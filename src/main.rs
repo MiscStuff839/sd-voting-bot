@@ -1,17 +1,15 @@
 use ordinal::ToOrdinal;
 use poise::{
-    CreateReply, FrameworkContext, Modal, execute_modal_on_component_interaction,
+    CreateReply, FrameworkContext,
     serenity_prelude::{
-        self as serenity, CacheHttp, ChannelId, ChannelType, ComponentInteraction, CreateActionRow,
-        CreateAllowedMentions, CreateButton, CreateEmbed, CreateMessage, CreateThread,
-        CreateWebhook, ExecuteWebhook, FullEvent, Webhook, json::json, model::webhook,
+        self as serenity, CacheHttp, ChannelId, ChannelType, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, CreateThread,
+        CreateWebhook, ExecuteWebhook, FullEvent, Webhook, json::json,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs::read_to_string,
-    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
+    sync::RwLock,
     vec,
 };
 
