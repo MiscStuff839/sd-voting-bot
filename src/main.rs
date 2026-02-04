@@ -1,17 +1,15 @@
+use lazy_static::lazy_static;
 use ordinal::ToOrdinal;
 use poise::{
     CreateReply, FrameworkContext,
     serenity_prelude::{
-        self as serenity, CacheHttp, ChannelId, ChannelType, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, CreateThread,
-        CreateWebhook, ExecuteWebhook, FullEvent, Webhook, json::json,
+        self as serenity, CacheHttp, ChannelId, ChannelType, CreateActionRow, CreateButton,
+        CreateEmbed, CreateMessage, CreateThread, CreateWebhook, ExecuteWebhook, FullEvent,
+        Webhook, json::json,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fs::read_to_string,
-    sync::RwLock,
-    vec,
-};
+use std::{fs::read_to_string, sync::RwLock, vec};
 
 use crate::{data::*, error::Error};
 
@@ -24,23 +22,37 @@ struct Config {
     webhook: Option<String>,
 }
 
+impl Config {
+    fn set_webhook<T: Into<String>>(&mut self, webhook_url: T) {
+        self.webhook = Some(webhook_url.into())
+    }
+    fn get_webhook(&self) -> Option<&String> {
+        self.webhook.as_ref()
+    }
+}
+
 #[derive(Debug)]
 struct Data {
     cfc_thread_id: RwLock<ChannelId>,
-    webhook: RwLock<Option<String>>,
 }
 
 type Context<'a> = poise::Context<'a, Data, Error>;
 
+lazy_static! {
+    static ref CONFIG: RwLock<Config> = RwLock::new(
+        match toml::from_str::<Config>(
+            &read_to_string(std::env::current_dir().unwrap().join("config.toml"))
+                .expect("Unable to find a config file"),
+        ) {
+            Ok(val) => val,
+            Err(err) => panic!("TOML deserialisation error: {}", err),
+        }
+    );
+}
+
 #[tokio::main]
 async fn main() {
-    let cfg = match toml::from_str::<Config>(
-        &read_to_string(std::env::current_dir().unwrap().join("config.toml"))
-            .expect("Unable to find a config file"),
-    ) {
-        Ok(val) => val,
-        Err(err) => panic!("TOML deserialisation error: {}", err),
-    };
+    let cfg = CONFIG.read().unwrap();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![cfc_senate()],
@@ -54,7 +66,6 @@ async fn main() {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data {
                     cfc_thread_id: RwLock::new(ChannelId::new(1)),
-                    webhook: RwLock::new(cfg.webhook),
                 })
             })
         })
@@ -64,7 +75,7 @@ async fn main() {
     let client = serenity::ClientBuilder::new(&cfg.token, intents)
         .framework(framework)
         .await;
-
+    drop(cfg);
     client.unwrap().start().await.unwrap();
 }
 
@@ -90,8 +101,8 @@ async fn event_handler(
                 match cfc {
                     Some(cfc) => {
                         let webhook = {
-                            let lock = data.webhook.read().unwrap();
-                            lock.as_ref().cloned()
+                            let lock = CONFIG.read().unwrap();
+                            lock.get_webhook().cloned()
                         };
                         match webhook {
                             None => {
@@ -101,19 +112,31 @@ async fn event_handler(
                                         let thread = data.cfc_thread_id.read().unwrap();
                                         ctx.http().get_channel(*thread)
                                     }
-                                    .await?;
-
-                                    parent.guild().unwrap().parent_id.unwrap().create_webhook(
-                                        &ctx,
-                                        CreateWebhook::new("SimDemocracy Bot"),
-                                    )
-                                }
-                                .await
-                                .unwrap();
+                                    .await?
+                                    .guild()
+                                    .unwrap()
+                                    .parent_id
+                                    .unwrap();
+                                    let webhooks = parent.webhooks(&ctx).await.unwrap();
+                                    match webhooks
+                                        .into_iter()
+                                        .find(|w| w.name == Some("SimDemocracy Bot".to_string()))
+                                    {
+                                        Some(w) => w,
+                                        None => {
+                                            parent
+                                                .create_webhook(
+                                                    &ctx,
+                                                    CreateWebhook::new("SimDemocracy Bot"),
+                                                )
+                                                .await?
+                                        }
+                                    }
+                                };
                                 drop(map);
                                 {
-                                    let mut lock = data.webhook.write().unwrap();
-                                    *lock = Some(webhook.url().unwrap());
+                                    let mut lock = CONFIG.write().unwrap();
+                                    lock.set_webhook(webhook.url().unwrap());
                                 }
                                 {
                                     let thread = data.cfc_thread_id.read().unwrap();
