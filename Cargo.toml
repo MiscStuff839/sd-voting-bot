@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitcode = "0.6.9"
 lazy_static = "1.5.0"
 ordinal = "0.4.0"
 poise = "0.6.1"

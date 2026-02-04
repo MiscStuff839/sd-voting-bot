@@ -1,20 +1,22 @@
+use bitcode::{decode, encode};
 use lazy_static::lazy_static;
 use ordinal::ToOrdinal;
 use poise::{
     CreateReply, FrameworkContext,
     serenity_prelude::{
         self as serenity, CacheHttp, ChannelId, ChannelType, CreateActionRow, CreateButton,
-        CreateEmbed, CreateMessage, CreateThread, CreateWebhook, ExecuteWebhook, FullEvent,
-        Webhook, json::json,
+        CreateEmbed, CreateMessage, CreateThread, CreateWebhook, EditWebhookMessage,
+        ExecuteWebhook, FullEvent, MessageId, Webhook, json::json,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::read_to_string, sync::RwLock, vec};
+use std::{collections::HashMap, fs::read_to_string, sync::RwLock, vec};
 
-use crate::{data::*, error::Error};
+use crate::{data::*, error::Error, events::acquire_webhook};
 
 mod data;
 mod error;
+mod events;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct Config {
@@ -33,10 +35,11 @@ impl Config {
 
 #[derive(Debug)]
 struct Data {
-    cfc_thread_id: RwLock<ChannelId>,
+    cfc_thread_id: ChannelId,
+    cfcs: HashMap<u64, (Vec<u8>, u64)>,
 }
 
-type Context<'a> = poise::Context<'a, Data, Error>;
+type Context<'a> = poise::Context<'a, RwLock<Data>, Error>;
 
 lazy_static! {
     static ref CONFIG: RwLock<Config> = RwLock::new(
@@ -64,9 +67,10 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data {
-                    cfc_thread_id: RwLock::new(ChannelId::new(1)),
-                })
+                Ok(RwLock::new(Data {
+                    cfc_thread_id: ChannelId::new(1),
+                    cfcs: HashMap::new(),
+                }))
             })
         })
         .build();
@@ -82,105 +86,76 @@ async fn main() {
 async fn event_handler(
     ctx: &serenity::Context,
     event: &FullEvent,
-    _: FrameworkContext<'_, Data, Error>,
-    data: &Data,
+    _: FrameworkContext<'_, RwLock<Data>, Error>,
+    data: &RwLock<Data>,
 ) -> Result<(), Error> {
     if let FullEvent::InteractionCreate { interaction } = event {
         if let serenity::Interaction::Component(component_interaction) = interaction {
             if component_interaction.data.custom_id.parse::<u32>().is_ok()
-                && data.cfc_thread_id.read().unwrap().get() != 1
+                && data.read().unwrap().cfc_thread_id.get() != 1
             {
+                let webhook = acquire_webhook(ctx, data).await?;
+                let thread_id = data.read().unwrap().cfc_thread_id;
+                let msg = data
+                    .read()
+                    .unwrap()
+                    .cfcs
+                    .get(&component_interaction.user.id.get())
+                    .cloned();
                 let cfc = execute_modal_generic(
                     ctx,
                     |resp| component_interaction.create_response(ctx, resp),
                     format!("{}_cfc", component_interaction.user.id),
-                    None::<SenateCFCModal>,
+                    msg.as_ref()
+                        .map(|(a, b)| (a, b))
+                        .unzip()
+                        .0
+                        .map(|cfc| decode::<SenateCFCModal>(&cfc).unwrap()),
                     None,
                 )
                 .await?;
                 match cfc {
                     Some(cfc) => {
-                        let webhook = {
-                            let lock = CONFIG.read().unwrap();
-                            lock.get_webhook().cloned()
+                        let msg = if msg.is_none() {
+                            webhook
+                                .execute(
+                                    ctx,
+                                    true,
+                                    ExecuteWebhook::new()
+                                        .content(format!(
+                                            "<@{}>\n{cfc}",
+                                            component_interaction.user.id.get()
+                                        ))
+                                        .avatar_url(
+                                            component_interaction.user.avatar_url().unwrap_or(
+                                                component_interaction.user.default_avatar_url(),
+                                            ),
+                                        )
+                                        .username(component_interaction.user.display_name())
+                                        .in_thread(thread_id),
+                                )
+                                .await?
+                                .unwrap()
+                        } else {
+                            webhook
+                                .edit_message(
+                                    &ctx,
+                                    MessageId::new(msg.unwrap().1),
+                                    EditWebhookMessage::new()
+                                        .content(format!(
+                                            "<@{}>\n{cfc}",
+                                            component_interaction.user.id.get()
+                                        ))
+                                        .in_thread(thread_id),
+                                )
+                                .await?
                         };
-                        match webhook {
-                            None => {
-                                let map = json!({"name": "SimDemocracy"});
-                                let webhook = {
-                                    let parent = {
-                                        let thread = data.cfc_thread_id.read().unwrap();
-                                        ctx.http().get_channel(*thread)
-                                    }
-                                    .await?
-                                    .guild()
-                                    .unwrap()
-                                    .parent_id
-                                    .unwrap();
-                                    let webhooks = parent.webhooks(&ctx).await.unwrap();
-                                    match webhooks
-                                        .into_iter()
-                                        .find(|w| w.name == Some("SimDemocracy Bot".to_string()))
-                                    {
-                                        Some(w) => w,
-                                        None => {
-                                            parent
-                                                .create_webhook(
-                                                    &ctx,
-                                                    CreateWebhook::new("SimDemocracy Bot"),
-                                                )
-                                                .await?
-                                        }
-                                    }
-                                };
-                                drop(map);
-                                {
-                                    let mut lock = CONFIG.write().unwrap();
-                                    lock.set_webhook(webhook.url().unwrap());
-                                }
-                                {
-                                    let thread = data.cfc_thread_id.read().unwrap();
-                                    webhook.execute(
-                                        ctx,
-                                        false,
-                                        ExecuteWebhook::new()
-                                            .content(format!(
-                                                "<@{}>\n{cfc}",
-                                                component_interaction.user.id.get()
-                                            ))
-                                            .avatar_url(
-                                                component_interaction.user.avatar_url().unwrap_or(
-                                                    component_interaction.user.default_avatar_url(),
-                                                ),
-                                            )
-                                            .username(component_interaction.user.display_name())
-                                            .in_thread(*thread),
-                                    )
-                                }
-                                .await?;
-                            }
-                            Some(webhook) => {
-                                let webhook = Webhook::from_url(ctx, &webhook).await?;
-                                webhook
-                                    .execute(
-                                        ctx,
-                                        false,
-                                        ExecuteWebhook::new()
-                                            .content(format!(
-                                                "<@{}>\n{cfc}",
-                                                component_interaction.user.id.get()
-                                            ))
-                                            .avatar_url(
-                                                component_interaction.user.avatar_url().unwrap_or(
-                                                    component_interaction.user.default_avatar_url(),
-                                                ),
-                                            )
-                                            .username(component_interaction.user.display_name()),
-                                    )
-                                    .await?;
-                            }
-                        }
+                        data.write().unwrap().cfcs.insert(
+                            component_interaction.user.id.get(),
+                            (encode(&cfc), msg.id.get()),
+                        );
                     }
+
                     None => {
                         component_interaction.user.dm(&ctx, CreateMessage::new().add_embed(CreateEmbed::new().description("The form you submitted was empty. Resubmit for your cfc to be registered"))).await?;
                     }
@@ -218,8 +193,7 @@ Aliquam erat volutpat."))
         )
         .await?
         .id;
-    let mut lock = ctx.data().cfc_thread_id.write().unwrap();
-    *lock = channel;
-
+    let mut lock = ctx.data().write().unwrap();
+    lock.cfc_thread_id = channel;
     Ok(())
 }

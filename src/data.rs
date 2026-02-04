@@ -1,8 +1,9 @@
 use std::fmt::Display;
 
-use poise::{Modal, serenity_prelude as serenity};
+use bitcode::{Decode, Encode};
+use poise::{Modal, serenity_prelude::{self as serenity, MessageId, UserId}};
 
-#[derive(Debug, Modal)]
+#[derive(Debug, Modal, Decode, Encode)]
 #[name = "CFC Application"]
 pub struct SenateCFCModal {
     #[name = "Reddit Username (with u/)"]
@@ -11,12 +12,21 @@ pub struct SenateCFCModal {
     party: String,
     #[name = "CFC Statement"]
     #[paragraph]
-    cfc: String
+    cfc: String,
 }
 
 impl Display for SenateCFCModal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "/{} | {}\n\n{}", self.reddit_user.as_ref().map(|v| v.as_str()).unwrap_or("No Reddit Account"), self.party, self.cfc)
+        write!(
+            f,
+            "/{} | {}\n\n{}",
+            self.reddit_user
+                .as_ref()
+                .map(|v| v.as_str())
+                .unwrap_or("No Reddit Account"),
+            self.party,
+            self.cfc
+        )
     }
 }
 
